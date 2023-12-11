@@ -39,6 +39,8 @@ import cats.Monad
 import cats.Traverse
 import cats.syntax.all._
 import cats.~>
+import cats.Eval
+import cats.Applicative
 
 case class Fix2[F[_]](unfix: F[Fix2[F]])
 
@@ -67,6 +69,9 @@ object recursion {
   def cata[F[_]: Functor, B](fold: F[B] => B)(tree: Fix2[F]): B =
     hylo[F, Fix2[F], B](_.unfix, fold)(tree)
 
+  def cataSafe[F[_]: Traverse, B](fold: F[B] => Eval[B])(tree: Fix2[F]): B =
+    (hyloM[Eval, F, Fix2[F], B](a => Eval.always(a.unfix), fold)(tree)).value
+
   def ana[F[_]: Functor, A](unfold: A => F[A])(a: A): Fix2[F] =
     hylo[F, A, Fix2[F]](unfold, Fix2(_))(a)
 
@@ -86,34 +91,48 @@ object MyAstF {
   final case class Number[A](result: BigInt) extends MyAstF[A]
   final case class OpPlus[A](left: A, right: A) extends MyAstF[A]
 
-  implicit val functor: Functor[MyAstF] = new Functor[MyAstF] {
+  implicit val functor: cats.Functor[MyAstF] = new Functor[MyAstF] {
     override def map[A, B](sa: MyAstF[A])(f: A => B): MyAstF[B] =
       sa match {
         case Number(result)      => Number(result)
         case OpPlus(left, right) => OpPlus(f(left), f(right))
       }
   }
+
+  implicit val traverse: cats.Traverse[MyAstF] = new Traverse[MyAstF] {
+    def foldLeft[A, B](fa: MyAstF[A], b: B)(f: (B, A) => B): B = fa match {
+      case Number(result) => b
+      case OpPlus(left, right) => f(f(b, left), right)
+    }
+    def foldRight[A, B](fa: MyAstF[A], lb: Eval[B])(f: (A, Eval[B]) => Eval[B]): Eval[B] = fa match {
+      case Number(result) => lb
+      case OpPlus(left, right) => f(left, f(right, lb))
+    }
+    def traverse[G[_]: Applicative, A, B](fa: MyAstF[A])(f: A => G[B]): G[MyAstF[B]] = fa match {
+      case Number(value) => Applicative[G].pure(Number(value))
+      case OpPlus(left, right) => (f(left), f(right)).mapN(OpPlus(_, _))
+    }
+  }
 }
 
-def fixedCalculator(myAst: MyAstF[BigInt]): BigInt = {
+def fixedCalculator(myAst: MyAstF[BigInt]): Eval[BigInt] = {
   myAst match
-    case MyAstF.Number(value) => value
-    case MyAstF.OpPlus(left, right) =>
-      left + right
+    case MyAstF.Number(value) => Eval.always(value)
+    case MyAstF.OpPlus(left, right) => Eval.always(left + right)
 }
 
 @tailrec
-def unfoldRecForFix(n: Int, acc: Fix[MyAstF]): Fix[MyAstF] =
+def unfoldRecForFix(n: Int, acc: Fix2[MyAstF]): Fix2[MyAstF] =
   if (n > 0) {
-    val b = Fix[MyAstF](MyAstF.Number(n))
+    val b = Fix2[MyAstF](MyAstF.Number(n))
     unfoldRecForFix(
       n - 1,
-      Fix(MyAstF.OpPlus[Fix[MyAstF]](acc, b))
+      Fix2(MyAstF.OpPlus[Fix2[MyAstF]](acc, b))
     )
   } else acc
 
-val aFixedTree: Fix[MyAstF] =
-  unfoldRecForFix(amount, Fix[MyAstF](MyAstF.Number(0)))
+val aFixedTree: Fix2[MyAstF] =
+  unfoldRecForFix(amount, Fix2[MyAstF](MyAstF.Number(0)))
 
 // println(aFixedTree)
 //
@@ -121,12 +140,13 @@ val aFixedTree: Fix[MyAstF] =
 // val a = recursion.cata(fixedCalculator)(aFixedTree)
 //
 // println(a)
+val a = recursion.cataSafe(fixedCalculator)(aFixedTree)
+println(a)
 
+// val fromNatAlgebra: Algebra[MyAstF,BigInt] = Algebra {
+//     case MyAstF.OpPlus(left, right) => left + right
+//     case MyAstF.Number(v)=> v
+// }
 
-val fromNatAlgebra: Algebra[MyAstF,BigInt] = Algebra {
-    case MyAstF.OpPlus(left, right) => left + right
-    case MyAstF.Number(v)=> v
-}
-
-val result = scheme.cata(fromNatAlgebra).apply(aFixedTree)
-println
+// val result = scheme.cata(fromNatAlgebra).apply(aFixedTree)
+// println
